@@ -962,6 +962,27 @@ def is_safetensors(path):
     return os.path.splitext(path)[1].lower() == ".safetensors"
 
 
+def _unwrap_wrapped_modules(sd: dict) -> dict:
+    # .wrapped. を . に置き換えるだけの単純変換
+    if not any(".wrapped." in k for k in sd.keys()):
+        return sd
+    new_sd = {}
+    for k, v in sd.items():
+        new_k = k.replace(".wrapped.", ".")
+        new_sd[new_k] = v
+    return new_sd
+
+
+def _assert_few_missing(info, what: str, max_missing: int = 0, max_unexpected: int = 0):
+    missing = getattr(info, "missing_keys", [])
+    unexpected = getattr(info, "unexpected_keys", [])
+    if len(missing) > max_missing or len(unexpected) > max_unexpected:
+        raise RuntimeError(
+            f"Incompatible {what} in checkpoint: "
+            f"{len(missing)} missing, {len(unexpected)} unexpected keys"
+        )
+
+
 def load_checkpoint_with_text_encoder_conversion(ckpt_path, device="cpu"):
     # text encoderの格納形式が違うモデルに対応する ('text_model'がない)
     TEXT_ENCODER_KEY_REPLACEMENTS = [
@@ -1002,9 +1023,11 @@ def load_models_from_stable_diffusion_checkpoint(v2, ckpt_path, device="cpu", dt
     # Convert the UNet2DConditionModel model.
     unet_config = create_unet_diffusers_config(v2, unet_use_linear_projection_in_v2)
     converted_unet_checkpoint = convert_ldm_unet_checkpoint(v2, state_dict, unet_config)
+    converted_unet_checkpoint = _unwrap_wrapped_modules(converted_unet_checkpoint)
 
     unet = UNet2DConditionModel(**unet_config).to(device)
     info = unet.load_state_dict(converted_unet_checkpoint)
+    _assert_few_missing(info, "UNet")
     logger.info(f"loading u-net: {info}")
 
     # Convert the VAE model.
@@ -1018,6 +1041,7 @@ def load_models_from_stable_diffusion_checkpoint(v2, ckpt_path, device="cpu", dt
     # convert text_model
     if v2:
         converted_text_encoder_checkpoint = convert_ldm_clip_checkpoint_v2(state_dict, 77)
+        converted_text_encoder_checkpoint = _unwrap_wrapped_modules(converted_text_encoder_checkpoint)
         cfg = CLIPTextConfig(
             vocab_size=49408,
             hidden_size=1024,
@@ -1043,6 +1067,7 @@ def load_models_from_stable_diffusion_checkpoint(v2, ckpt_path, device="cpu", dt
         info = text_model.load_state_dict(converted_text_encoder_checkpoint)
     else:
         converted_text_encoder_checkpoint = convert_ldm_clip_checkpoint_v1(state_dict)
+        converted_text_encoder_checkpoint = _unwrap_wrapped_modules(converted_text_encoder_checkpoint)
 
         # logging.set_verbosity_error()  # don't show annoying warning
         # text_model = CLIPTextModel.from_pretrained("openai/clip-vit-large-patch14").to(device)
@@ -1070,6 +1095,7 @@ def load_models_from_stable_diffusion_checkpoint(v2, ckpt_path, device="cpu", dt
         )
         text_model = CLIPTextModel._from_config(cfg)
         info = text_model.load_state_dict(converted_text_encoder_checkpoint)
+    _assert_few_missing(info, "TextEncoder")
     logger.info(f"loading text encoder: {info}")
 
     return text_model, vae, unet
